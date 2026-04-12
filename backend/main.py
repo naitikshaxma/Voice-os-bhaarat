@@ -94,7 +94,7 @@ async def transcribe(audio: UploadFile = File(...), language: str = Form("hi")) 
         raise HTTPException(status_code=400, detail="Audio payload is empty.")
 
     suffix = Path(audio.filename or "input.webm").suffix or ".webm"
-    transcript = transcribe_audio(audio_bytes, language="hi", source_suffix=suffix)
+    transcript = transcribe_audio(audio_bytes, language=language, source_suffix=suffix)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio.")
 
@@ -161,7 +161,7 @@ async def process_audio(
             raise HTTPException(status_code=400, detail="Audio payload is empty.")
 
         suffix = Path(audio.filename or "input.webm").suffix or ".webm"
-        transcript = transcribe_audio(audio_bytes, language="hi", source_suffix=suffix)
+        transcript = transcribe_audio(audio_bytes, language=language, source_suffix=suffix)
         if not transcript:
             raise HTTPException(status_code=400, detail="Could not transcribe audio.")
         _debug_print("Transcript:", transcript)

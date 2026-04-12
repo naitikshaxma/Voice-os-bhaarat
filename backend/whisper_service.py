@@ -24,9 +24,17 @@ if shutil.which("ffmpeg") is None and imageio_ffmpeg is not None:
     os.environ["PATH"] = f"{bundled_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_SIZE", "base")
-FORCED_TRANSCRIBE_LANGUAGE = "hi"
+DEFAULT_TRANSCRIBE_LANGUAGE = os.getenv("STT_DEFAULT_LANGUAGE", "hi").strip().lower() or "hi"
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 _model = None
+
+try:
+    # Whisper language codes are exposed by openai-whisper tokenizer.
+    from whisper.tokenizer import LANGUAGES as WHISPER_LANGUAGES  # type: ignore
+
+    SUPPORTED_LANGUAGE_CODES = set(WHISPER_LANGUAGES.keys())
+except Exception:
+    SUPPORTED_LANGUAGE_CODES = set()
 
 
 def _normalize_suffix(source_suffix: Optional[str]) -> str:
@@ -55,8 +63,19 @@ def get_whisper_status() -> dict:
         "model_name": WHISPER_MODEL_NAME,
         "model_loaded": _model is not None,
         "ffmpeg_available": FFMPEG_AVAILABLE,
-        "forced_language": FORCED_TRANSCRIBE_LANGUAGE,
+        "default_language": DEFAULT_TRANSCRIBE_LANGUAGE,
     }
+
+
+def _resolve_transcribe_language(language: Optional[str]) -> str:
+    requested = (language or "").strip().lower().replace("_", "-")
+    if not requested:
+        return DEFAULT_TRANSCRIBE_LANGUAGE
+
+    primary = requested.split("-", 1)[0]
+    if SUPPORTED_LANGUAGE_CODES and primary not in SUPPORTED_LANGUAGE_CODES:
+        return DEFAULT_TRANSCRIBE_LANGUAGE
+    return primary
 
 
 def transcribe_audio(audio_bytes: bytes, language: Optional[str] = None, source_suffix: str = ".webm") -> str:
@@ -74,10 +93,14 @@ def transcribe_audio(audio_bytes: bytes, language: Optional[str] = None, source_
         tmp_path = tmp.name
 
     try:
-        # Hindi-first mode to prevent Urdu-script drift for Hindi speech input.
-        _ = language
-        options = {"fp16": False, "language": FORCED_TRANSCRIBE_LANGUAGE}
-        result = _get_model().transcribe(tmp_path, **options)
+        selected_language = _resolve_transcribe_language(language)
+        options = {"fp16": False, "language": selected_language}
+        try:
+            result = _get_model().transcribe(tmp_path, **options)
+        except ValueError:
+            # If a language code slips through and whisper rejects it, use the default.
+            fallback_options = {"fp16": False, "language": DEFAULT_TRANSCRIBE_LANGUAGE}
+            result = _get_model().transcribe(tmp_path, **fallback_options)
         transcript = result.get("text", "").strip()
         return transcript
     finally:
