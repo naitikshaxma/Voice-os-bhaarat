@@ -3,6 +3,7 @@ import os
 import logging
 import re
 import uuid
+from time import perf_counter
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,14 @@ from slowapi.util import get_remote_address
 
 from .bert_service import get_intent_model_status, predict_intent
 from .flow_engine import generate_response
+from .observability import (
+    clear_request_context,
+    configure_logging,
+    get_metrics_snapshot,
+    record_request_metric,
+    set_request_context,
+    set_session_context,
+)
 from .rag_service import get_rag_status
 from .security import (
     MAX_TEXT_LENGTH,
@@ -31,6 +40,7 @@ from .tts_service import generate_tts
 from .whisper_service import DEFAULT_TRANSCRIBE_LANGUAGE, get_whisper_status, transcribe_audio, warmup_whisper
 
 app = FastAPI(title="Voice OS Bharat")
+configure_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("voice_os_bharat")
 APP_ENV = os.getenv("ENV", "development").strip().lower()
 
@@ -69,10 +79,48 @@ app.add_middleware(
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     request.state.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-Request-ID"] = request.state.request_id
+    request.state.session_id = ""
+    set_request_context(request_id=request.state.request_id)
+
+    started = perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        record_request_metric(request.url.path, elapsed_ms)
+        logger.error(
+            "request_failed",
+            extra={
+                "event": "request",
+                "method": request.method,
+                "endpoint": request.url.path,
+                "status_code": 500,
+                "response_time_ms": round(elapsed_ms, 2),
+            },
+        )
+        raise
+    finally:
+        if response is not None:
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            record_request_metric(request.url.path, elapsed_ms)
+            logger.info(
+                "request_completed",
+                extra={
+                    "event": "request",
+                    "method": request.method,
+                    "endpoint": request.url.path,
+                    "status_code": response.status_code,
+                    "response_time_ms": round(elapsed_ms, 2),
+                },
+            )
+
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-Request-ID"] = request.state.request_id
+
+        clear_request_context()
+
     return response
 
 
@@ -103,7 +151,7 @@ def health() -> dict:
 
 def _debug_print(label: str, value: object) -> None:
     safe_value = str(value).encode("unicode_escape").decode("ascii")
-    print(label, safe_value)
+    logger.info("debug_event", extra={"event": label.strip(":"), "count": safe_value})
 
 
 class IntentRequest(BaseModel):
@@ -175,8 +223,12 @@ def _response_text_to_message(response_text: dict) -> str:
 
 def _process_transcript(transcript: str, user_id: str, language: str, session_id: Optional[str] = None) -> dict:
     resolved_session_id, _ = get_or_create_session(session_id=session_id, user_id=user_id)
+    set_session_context(resolved_session_id)
     _, conversation_history = get_conversation_history(session_id=resolved_session_id, user_id=user_id)
-    logger.info("conversation_history_loaded session_id=%s messages=%s", resolved_session_id, len(conversation_history))
+    logger.info(
+        "conversation_history_loaded",
+        extra={"event": "session", "session_id": resolved_session_id, "count": len(conversation_history)},
+    )
 
     response_text, intent, confidence = generate_response(language=language, transcript=transcript)
 
@@ -239,6 +291,8 @@ async def transcribe(
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio.")
     resolved_session_id, record = get_or_create_session(session_id=session_id)
+    request.state.session_id = resolved_session_id
+    set_session_context(resolved_session_id)
 
     _debug_print("Transcript:", transcript)
     return {
@@ -261,6 +315,13 @@ def detect_intent(request: Request, payload: IntentRequest) -> dict:
         "intent": intent,
         "confidence": round(float(confidence) * 100.0, 2),
     }
+
+
+@app.get("/api/metrics")
+@limiter.limit("60/minute")
+def metrics(request: Request) -> dict:
+    _ = request
+    return get_metrics_snapshot()
 
 
 @app.post("/api/tts")

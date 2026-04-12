@@ -55,7 +55,7 @@ def warmup_whisper() -> None:
 def _get_model():
     global _model
     if _model is None:
-        print(f"Loading Whisper STT model: {WHISPER_MODEL_NAME}")
+        logger.info("whisper_model_loading", extra={"event": "model_load", "count": WHISPER_MODEL_NAME})
         _model = whisper.load_model(WHISPER_MODEL_NAME)
     return _model
 

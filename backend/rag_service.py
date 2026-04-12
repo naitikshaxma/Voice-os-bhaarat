@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -87,11 +88,12 @@ def _build_terms(scheme: dict) -> List[str]:
 
 SCHEMES = _load_schemes()
 PREPARED_SCHEMES: List[Tuple[dict, List[str]]] = [(scheme, _build_terms(scheme)) for scheme in SCHEMES]
+logger = logging.getLogger("voice_os_bharat.rag")
 
 
 def _debug_print(label: str, value: str) -> None:
     safe_value = str(value).encode("unicode_escape").decode("ascii")
-    print(label, safe_value)
+    logger.info("rag_debug", extra={"event": label.strip(":"), "count": safe_value})
 
 
 def _filter_generic_tokens(text: str) -> str:
@@ -135,7 +137,7 @@ def retrieve_scheme(transcript: str, language: str = "en") -> Optional[dict]:
                 continue
             if score > 75:
                 _debug_print("Matched keyword:", keyword)
-                print("Match score:", score)
+                logger.info("rag_match", extra={"event": "match_score", "count": score})
                 if lang == "hi":
                     return {
                         "confirmation": scheme["summary_hi"],

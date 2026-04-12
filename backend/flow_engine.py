@@ -1,3 +1,4 @@
+import logging
 from typing import Tuple
 
 from .bert_service import predict_intent
@@ -5,6 +6,7 @@ from .rag_service import retrieve_scheme
 from .text_normalizer import normalize_text
 
 INTENT_THRESHOLD = 0.35
+logger = logging.getLogger("voice_os_bharat.flow")
 
 RESPONSES = {
     "account_balance": {
@@ -72,16 +74,16 @@ RESPONSES = {
 
 def _debug_print(label: str, value: object) -> None:
     safe_value = str(value).encode("unicode_escape").decode("ascii")
-    print(label, safe_value)
+    logger.info("flow_debug", extra={"event": label.strip(":"), "count": safe_value})
 
 
 def generate_response(language: str, transcript: str) -> Tuple[dict, str, float]:
     lang = "hi" if (language or "").strip().lower() == "hi" else "en"
 
     # 1) RAG first
-    print("Transcript:", transcript)
-    print("Normalized query:", normalize_text(transcript))
-    print("Checking scheme retrieval...")
+    _debug_print("Transcript:", transcript)
+    _debug_print("Normalized query:", normalize_text(transcript))
+    logger.info("flow_stage", extra={"event": "rag_lookup"})
     scheme = retrieve_scheme(transcript, lang)
     if scheme:
         intent = "scheme_query"
