@@ -1,4 +1,5 @@
 import time
+import os
 import logging
 import re
 import uuid
@@ -24,12 +25,14 @@ from .security import (
     sanitize_text,
     verify_demo_user,
 )
-from .session_manager import get_session, update_session
+from .session_manager import append_conversation, get_conversation_history, get_or_create_session, update_session
+from .session_manager import get_session_debug_snapshot
 from .tts_service import generate_tts
 from .whisper_service import DEFAULT_TRANSCRIBE_LANGUAGE, get_whisper_status, transcribe_audio, warmup_whisper
 
 app = FastAPI(title="Voice OS Bharat")
 logger = logging.getLogger("voice_os_bharat")
+APP_ENV = os.getenv("ENV", "development").strip().lower()
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -164,7 +167,17 @@ def issue_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     }
 
 
-def _process_transcript(transcript: str, user_id: str, language: str) -> dict:
+def _response_text_to_message(response_text: dict) -> str:
+    return " ".join(
+        [response_text.get("confirmation", ""), response_text.get("explanation", ""), response_text.get("next_step", "")]
+    ).strip()
+
+
+def _process_transcript(transcript: str, user_id: str, language: str, session_id: Optional[str] = None) -> dict:
+    resolved_session_id, _ = get_or_create_session(session_id=session_id, user_id=user_id)
+    _, conversation_history = get_conversation_history(session_id=resolved_session_id, user_id=user_id)
+    logger.info("conversation_history_loaded session_id=%s messages=%s", resolved_session_id, len(conversation_history))
+
     response_text, intent, confidence = generate_response(language=language, transcript=transcript)
 
     tts_input = " ".join(
@@ -174,7 +187,6 @@ def _process_transcript(transcript: str, user_id: str, language: str) -> dict:
     if not audio_base64:
         raise HTTPException(status_code=500, detail="TTS generation failed.")
 
-    get_session(user_id)
     update_session(
         user_id,
         {
@@ -185,7 +197,19 @@ def _process_transcript(transcript: str, user_id: str, language: str) -> dict:
         },
     )
 
+    assistant_text = _response_text_to_message(response_text)
+    resolved_session_id = append_conversation(
+        session_id=resolved_session_id,
+        user_id=user_id,
+        user_text=transcript,
+        assistant_text=assistant_text,
+    )
+    _, updated_history = get_conversation_history(session_id=resolved_session_id, user_id=user_id)
+
     return {
+        "session_id": resolved_session_id,
+        "conversation_length": len(updated_history),
+        "session_active": True,
         "transcript": transcript,
         "intent": intent,
         "confidence": round(float(confidence) * 100.0, 2),
@@ -200,6 +224,7 @@ async def transcribe(
     request: Request,
     audio: UploadFile = File(...),
     language: str = Form("hi"),
+    session_id: str = Form(""),
     current_user: Optional[str] = Depends(get_optional_current_user),
 ) -> dict:
     _ = current_user
@@ -213,9 +238,16 @@ async def transcribe(
     transcript = transcribe_audio(audio_bytes, language=safe_language, source_suffix=suffix)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio.")
+    resolved_session_id, record = get_or_create_session(session_id=session_id)
 
     _debug_print("Transcript:", transcript)
-    return {"transcript": transcript, "language": language}
+    return {
+        "session_id": resolved_session_id,
+        "conversation_length": len(record.get("history", [])),
+        "session_active": True,
+        "transcript": transcript,
+        "language": language,
+    }
 
 
 @app.post("/api/intent")
@@ -252,12 +284,18 @@ def process_text(
     text: str = Form(...),
     user_id: str = Form(...),
     language: str = Form("en"),
+    session_id: str = Form(""),
 ) -> dict:
     transcript = _validate_text_input(text)
     safe_language = _validate_language(language)
 
     _debug_print("Frontend transcript:", transcript)
-    return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
+    return _process_transcript(
+        transcript=transcript,
+        user_id=user_id,
+        language=safe_language,
+        session_id=session_id,
+    )
 
 
 @app.post("/api/process-audio")
@@ -268,6 +306,7 @@ async def process_audio(
     text: str = Form(""),
     user_id: str = Form(...),
     language: str = Form("en"),
+    session_id: str = Form(""),
     current_user: Optional[str] = Depends(get_optional_current_user),
 ) -> dict:
     _ = current_user
@@ -278,7 +317,12 @@ async def process_audio(
             raise HTTPException(status_code=400, detail=f"Text payload exceeds {MAX_TEXT_LENGTH} characters.")
         if transcript:
             _debug_print("Frontend transcript:", transcript)
-            return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
+            return _process_transcript(
+                transcript=transcript,
+                user_id=user_id,
+                language=safe_language,
+                session_id=session_id,
+            )
 
         if audio is None:
             raise HTTPException(status_code=400, detail="Either text or audio is required.")
@@ -294,9 +338,24 @@ async def process_audio(
             raise HTTPException(status_code=400, detail="Could not transcribe audio.")
         _debug_print("Transcript:", transcript)
 
-        return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
+        return _process_transcript(
+            transcript=transcript,
+            user_id=user_id,
+            language=safe_language,
+            session_id=session_id,
+        )
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Failed to process audio request request_id=%s", getattr(request.state, "request_id", "n/a"))
         raise HTTPException(status_code=500, detail="Something went wrong") from exc
+
+
+if APP_ENV == "development":
+
+    @app.get("/api/debug/session/{session_id}")
+    def debug_session(session_id: str) -> dict:
+        snapshot = get_session_debug_snapshot(session_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return snapshot
