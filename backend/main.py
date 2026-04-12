@@ -1,19 +1,54 @@
 import time
+import logging
+import re
+import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from fastapi.security import OAuth2PasswordRequestForm
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from .bert_service import get_intent_model_status, predict_intent
 from .flow_engine import generate_response
 from .rag_service import get_rag_status
+from .security import (
+    MAX_TEXT_LENGTH,
+    create_access_token,
+    get_optional_current_user,
+    sanitize_text,
+    verify_demo_user,
+)
 from .session_manager import get_session, update_session
 from .tts_service import generate_tts
-from .whisper_service import get_whisper_status, transcribe_audio, warmup_whisper
+from .whisper_service import DEFAULT_TRANSCRIBE_LANGUAGE, get_whisper_status, transcribe_audio, warmup_whisper
 
 app = FastAPI(title="Voice OS Bharat")
+logger = logging.getLogger("voice_os_bharat")
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning("rate_limit_exceeded path=%s request_id=%s", request.url.path, getattr(request.state, "request_id", "n/a"))
+    return JSONResponse(status_code=429, content={"error": "Rate limit exceeded. Please try again later."})
+
+MAX_AUDIO_BYTES = 5 * 1024 * 1024
+ALLOWED_AUDIO_MIME_TYPES = {
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/webm",
+    "video/webm",
+}
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +58,29 @@ app.add_middleware(
         "http://localhost:8080",
         "http://127.0.0.1:8080",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "User-Agent"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    request.state.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "Unhandled exception on path %s request_id=%s",
+        request.url.path,
+        getattr(request.state, "request_id", "n/a"),
+    )
+    return JSONResponse(status_code=500, content={"error": "Something went wrong"})
 
 
 @app.on_event("startup")
@@ -55,6 +110,58 @@ class IntentRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     language: str = "en"
+
+
+def _validate_language(language: str) -> str:
+    lang = (language or "").strip()
+    if not lang:
+        return DEFAULT_TRANSCRIBE_LANGUAGE
+    if len(lang) > 15:
+        return DEFAULT_TRANSCRIBE_LANGUAGE
+    if not re.fullmatch(r"[A-Za-z_-]+", lang):
+        return DEFAULT_TRANSCRIBE_LANGUAGE
+    return lang
+
+
+def _validate_text_input(text: str) -> str:
+    cleaned = sanitize_text(text)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Text payload is empty.")
+    if len(cleaned) > MAX_TEXT_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Text payload exceeds {MAX_TEXT_LENGTH} characters.")
+    return cleaned
+
+
+def _validate_audio_upload(audio: UploadFile, audio_bytes: bytes) -> None:
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail=f"Audio payload is too large. Max allowed is {MAX_AUDIO_BYTES // (1024 * 1024)}MB.")
+    content_type = (audio.content_type or "").lower().strip()
+    if content_type and content_type not in ALLOWED_AUDIO_MIME_TYPES:
+        allowed_types = ", ".join(sorted(ALLOWED_AUDIO_MIME_TYPES))
+        raise HTTPException(status_code=400, detail=f"Unsupported audio format. Allowed MIME types: {allowed_types}")
+
+
+@app.post("/api/auth/token")
+@limiter.limit("10/minute")
+def issue_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()) -> dict:
+    if not verify_demo_user(form_data.username, form_data.password):
+        logger.warning(
+            "auth_login_failed user=%s request_id=%s",
+            form_data.username,
+            getattr(request.state, "request_id", "n/a"),
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    access_token = create_access_token(subject=form_data.username)
+    logger.info(
+        "auth_login_success user=%s request_id=%s",
+        form_data.username,
+        getattr(request.state, "request_id", "n/a"),
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+    }
 
 
 def _process_transcript(transcript: str, user_id: str, language: str) -> dict:
@@ -88,13 +195,22 @@ def _process_transcript(transcript: str, user_id: str, language: str) -> dict:
 
 
 @app.post("/api/transcribe")
-async def transcribe(audio: UploadFile = File(...), language: str = Form("hi")) -> dict:
+@limiter.limit("20/minute")
+async def transcribe(
+    request: Request,
+    audio: UploadFile = File(...),
+    language: str = Form("hi"),
+    current_user: Optional[str] = Depends(get_optional_current_user),
+) -> dict:
+    _ = current_user
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Audio payload is empty.")
+    _validate_audio_upload(audio, audio_bytes)
 
     suffix = Path(audio.filename or "input.webm").suffix or ".webm"
-    transcript = transcribe_audio(audio_bytes, language=language, source_suffix=suffix)
+    safe_language = _validate_language(language)
+    transcript = transcribe_audio(audio_bytes, language=safe_language, source_suffix=suffix)
     if not transcript:
         raise HTTPException(status_code=400, detail="Could not transcribe audio.")
 
@@ -103,7 +219,9 @@ async def transcribe(audio: UploadFile = File(...), language: str = Form("hi")) 
 
 
 @app.post("/api/intent")
-def detect_intent(payload: IntentRequest) -> dict:
+@limiter.limit("40/minute")
+def detect_intent(request: Request, payload: IntentRequest) -> dict:
+    _ = request
     intent, confidence = predict_intent(payload.text)
     _debug_print("Detected intent:", intent)
     _debug_print("Confidence:", confidence)
@@ -114,12 +232,13 @@ def detect_intent(payload: IntentRequest) -> dict:
 
 
 @app.post("/api/tts")
-def synthesize(payload: TTSRequest) -> dict:
-    text = (payload.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Text payload is empty.")
+@limiter.limit("30/minute")
+def synthesize(request: Request, payload: TTSRequest) -> dict:
+    _ = request
+    text = _validate_text_input(payload.text)
+    safe_language = _validate_language(payload.language)
 
-    audio_base64 = generate_tts(text, payload.language)
+    audio_base64 = generate_tts(text, safe_language)
     if not audio_base64:
         raise HTTPException(status_code=500, detail="TTS generation failed.")
 
@@ -127,31 +246,39 @@ def synthesize(payload: TTSRequest) -> dict:
 
 
 @app.post("/api/process-text")
+@limiter.limit("30/minute")
 def process_text(
+    request: Request,
     text: str = Form(...),
     user_id: str = Form(...),
     language: str = Form("en"),
 ) -> dict:
-    transcript = (text or "").strip()
-    if not transcript:
-        raise HTTPException(status_code=400, detail="Text payload is empty.")
+    transcript = _validate_text_input(text)
+    safe_language = _validate_language(language)
 
     _debug_print("Frontend transcript:", transcript)
-    return _process_transcript(transcript=transcript, user_id=user_id, language=language)
+    return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
 
 
 @app.post("/api/process-audio")
+@limiter.limit("20/minute")
 async def process_audio(
+    request: Request,
     audio: Optional[UploadFile] = File(None),
     text: str = Form(""),
     user_id: str = Form(...),
     language: str = Form("en"),
+    current_user: Optional[str] = Depends(get_optional_current_user),
 ) -> dict:
+    _ = current_user
     try:
-        transcript = (text or "").strip()
+        safe_language = _validate_language(language)
+        transcript = sanitize_text(text)
+        if len(transcript) > MAX_TEXT_LENGTH:
+            raise HTTPException(status_code=400, detail=f"Text payload exceeds {MAX_TEXT_LENGTH} characters.")
         if transcript:
             _debug_print("Frontend transcript:", transcript)
-            return _process_transcript(transcript=transcript, user_id=user_id, language=language)
+            return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
 
         if audio is None:
             raise HTTPException(status_code=400, detail="Either text or audio is required.")
@@ -159,15 +286,17 @@ async def process_audio(
         audio_bytes = await audio.read()
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="Audio payload is empty.")
+        _validate_audio_upload(audio, audio_bytes)
 
         suffix = Path(audio.filename or "input.webm").suffix or ".webm"
-        transcript = transcribe_audio(audio_bytes, language=language, source_suffix=suffix)
+        transcript = transcribe_audio(audio_bytes, language=safe_language, source_suffix=suffix)
         if not transcript:
             raise HTTPException(status_code=400, detail="Could not transcribe audio.")
         _debug_print("Transcript:", transcript)
 
-        return _process_transcript(transcript=transcript, user_id=user_id, language=language)
+        return _process_transcript(transcript=transcript, user_id=user_id, language=safe_language)
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Failed to process audio request request_id=%s", getattr(request.state, "request_id", "n/a"))
+        raise HTTPException(status_code=500, detail="Something went wrong") from exc

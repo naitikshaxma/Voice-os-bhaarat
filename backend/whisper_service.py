@@ -1,4 +1,5 @@
 import os
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -27,6 +28,7 @@ WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_SIZE", "base")
 DEFAULT_TRANSCRIBE_LANGUAGE = os.getenv("STT_DEFAULT_LANGUAGE", "hi").strip().lower() or "hi"
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 _model = None
+logger = logging.getLogger("voice_os_bharat.whisper")
 
 try:
     # Whisper language codes are exposed by openai-whisper tokenizer.
@@ -67,7 +69,7 @@ def get_whisper_status() -> dict:
     }
 
 
-def _resolve_transcribe_language(language: Optional[str]) -> str:
+def resolve_transcribe_language(language: Optional[str]) -> str:
     requested = (language or "").strip().lower().replace("_", "-")
     if not requested:
         return DEFAULT_TRANSCRIBE_LANGUAGE
@@ -93,12 +95,18 @@ def transcribe_audio(audio_bytes: bytes, language: Optional[str] = None, source_
         tmp_path = tmp.name
 
     try:
-        selected_language = _resolve_transcribe_language(language)
+        selected_language = resolve_transcribe_language(language)
+        logger.info("stt_language_flow requested=%s used=%s", language, selected_language)
         options = {"fp16": False, "language": selected_language}
         try:
             result = _get_model().transcribe(tmp_path, **options)
         except ValueError:
             # If a language code slips through and whisper rejects it, use the default.
+            logger.warning(
+                "stt_language_fallback requested=%s used=%s reason=whisper_value_error",
+                language,
+                DEFAULT_TRANSCRIBE_LANGUAGE,
+            )
             fallback_options = {"fp16": False, "language": DEFAULT_TRANSCRIBE_LANGUAGE}
             result = _get_model().transcribe(tmp_path, **fallback_options)
         transcript = result.get("text", "").strip()
