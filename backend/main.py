@@ -84,7 +84,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://your-frontend.vercel.app"
+        "https://voice-os-bhaarat.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
