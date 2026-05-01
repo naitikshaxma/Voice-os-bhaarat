@@ -140,6 +140,14 @@ def issue_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     })
 
 
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+@app.get("/health")
+def health_endpoint():
+    return {"status": "ok"}
+
 # Routers
 app.include_router(health.router)
 app.include_router(audio.router)
