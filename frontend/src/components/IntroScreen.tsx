@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import SparkleBackground from './result/SparkleBackground';
+
 
 const languages = [
     { native: 'हिन्दी', english: 'HINDI' },
@@ -52,10 +52,10 @@ const IntroScreen = ({ onComplete }: IntroScreenProps) => {
 
     return (
         <div
-            className="intro-screen"
+            className="intro-screen sparkle-bg"
             style={{ opacity: isFadingOut ? 0 : 1 }}
         >
-            <SparkleBackground />
+
 
             <div className="intro-content">
                 {/* Project name */}

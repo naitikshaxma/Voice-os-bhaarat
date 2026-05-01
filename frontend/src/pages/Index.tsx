@@ -1,11 +1,8 @@
-import { useState, useCallback } from 'react';
-import SparkleBackground from '@/components/result/SparkleBackground';
+import { useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import LanguageSelector from '@/components/LanguageSelector';
-import VoiceInteraction from '@/components/VoiceInteraction';
-
-type AppStage = 'landing' | 'voice';
 
 interface Language {
   code: string;
@@ -15,35 +12,15 @@ interface Language {
 }
 
 const Index = () => {
-  const [stage, setStage] = useState<AppStage>('landing');
-  const [selectedLanguage, setSelectedLanguage] = useState<Language | null>(null);
+  const navigate = useNavigate();
 
   const handleLanguageSelect = useCallback((language: Language) => {
-    setSelectedLanguage(language);
-    setStage('voice');
-  }, []);
-
-  const handleBackToLanding = useCallback(() => {
-    setStage('landing');
-  }, []);
-
-  /* Voice interaction — full screen with dark bg */
-  if (stage === 'voice' && selectedLanguage) {
-    return (
-      <>
-        <SparkleBackground />
-        <VoiceInteraction
-          language={selectedLanguage}
-          onBack={handleBackToLanding}
-        />
-      </>
-    );
-  }
+    navigate(`/assistant?lang=${language.code}`);
+  }, [navigate]);
 
   /* Landing page — dark theme with sparkle */
   return (
-    <div className="min-h-screen relative">
-      <SparkleBackground />
+    <div className="min-h-screen relative bg-black text-white">
 
       <div className="relative z-10 min-h-screen flex flex-col">
         <Navbar />

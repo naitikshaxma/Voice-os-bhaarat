@@ -1,8 +1,8 @@
-import { useState, useCallback } from 'react';
-import { BrowserRouter, Routes, Route, useSearchParams } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, useSearchParams, useNavigate, Navigate } from 'react-router-dom';
 import IntroScreen from './components/IntroScreen';
 import Index from './pages/Index';
-import ResultPage from './pages/ResultPage';
+import Auth from './pages/Auth';
 import NotFound from './pages/NotFound';
 import VoiceInteraction from './components/VoiceInteraction';
 
@@ -26,33 +26,63 @@ const LANGUAGES = [
 /** /assistant?lang=hi — direct route for spec compliance */
 const AssistantRoute = () => {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
   const langCode = params.get('lang') ?? 'en';
   const language = LANGUAGES.find((l) => l.code === langCode) ?? LANGUAGES[1];
 
-  const handleBack = useCallback(() => {
-    window.history.back();
-  }, []);
+  const handleBack = () => {
+    navigate('/language');
+  };
 
   return <VoiceInteraction language={language} onBack={handleBack} />;
 };
 
-const App = () => {
+const HomeRoute = () => {
   const [showIntro, setShowIntro] = useState(true);
+  const navigate = useNavigate();
 
-  const handleIntroComplete = useCallback(() => {
+  const handleIntroComplete = () => {
     setShowIntro(false);
-  }, []);
+    const token = localStorage.getItem('voice_os_token');
+    if (token) {
+      navigate('/language');
+    } else {
+      navigate('/auth');
+    }
+  };
 
   if (showIntro) {
     return <IntroScreen onComplete={handleIntroComplete} />;
   }
 
+  // Fallback if intro finishes but navigate hasn't fully applied
+  return null;
+};
+
+const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
+  const token = localStorage.getItem('voice_os_token');
+  if (!token) {
+    return <Navigate to="/auth" />;
+  }
+  return children;
+};
+
+const App = () => {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Index />} />
-        <Route path="/assistant" element={<AssistantRoute />} />
-        <Route path="/result" element={<ResultPage />} />
+        <Route path="/" element={<HomeRoute />} />
+        <Route path="/auth" element={<Auth />} />
+        <Route path="/language" element={
+          <ProtectedRoute>
+            <Index />
+          </ProtectedRoute>
+        } />
+        <Route path="/assistant" element={
+          <ProtectedRoute>
+            <AssistantRoute />
+          </ProtectedRoute>
+        } />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>

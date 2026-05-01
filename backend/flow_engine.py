@@ -1,107 +1,57 @@
+"""
+flow_engine.py — Simplified, dataset-driven response generation.
+
+Uses scheme_engine (keyword-based, no ML) for fast, reliable results.
+"""
 import logging
-from typing import Tuple
+from time import perf_counter
+from typing import Dict, List, Optional, Tuple
 
-from .bert_service import predict_intent
-from .rag_service import retrieve_scheme
-from .text_normalizer import normalize_text
+from .scheme_engine import get_scheme_response, detect_topic
+from .config import FALLBACK_RESPONSES
 
-INTENT_THRESHOLD = 0.35
 logger = logging.getLogger("voice_os_bharat.flow")
 
-RESPONSES = {
-    "account_balance": {
-        "en": {
-            "confirmation": "Checking your account balance.",
-            "explanation": "Your balance is 24,530 rupees.",
-            "next_step": "Would you like recent transactions?",
-        },
-        "hi": {
-            "confirmation": "आपका खाता बैलेंस देखा जा रहा है।",
-            "explanation": "आपके खाते में 24,530 रुपये हैं।",
-            "next_step": "क्या आप हाल की लेनदेन देखना चाहते हैं?",
-        },
-    },
-    "apply_loan": {
-        "en": {
-            "confirmation": "I can help with loan application information.",
-            "explanation": "You can apply for personal, home, or business loans through eligible channels.",
-            "next_step": "Would you like the required documents list?",
-        },
-        "hi": {
-            "confirmation": "मैं लोन आवेदन की जानकारी देने में मदद कर सकता हूँ।",
-            "explanation": "आप व्यक्तिगत, गृह या व्यवसाय ऋण के लिए पात्र चैनलों से आवेदन कर सकते हैं।",
-            "next_step": "क्या आप जरूरी दस्तावेजों की सूची जानना चाहते हैं?",
-        },
-    },
-    "check_application_status": {
-        "en": {
-            "confirmation": "I can help check your application status.",
-            "explanation": "Please keep your application reference number ready for status tracking.",
-            "next_step": "Would you like step-by-step tracking guidance?",
-        },
-        "hi": {
-            "confirmation": "मैं आपके आवेदन की स्थिति देखने में मदद कर सकता हूँ।",
-            "explanation": "कृपया स्टेटस ट्रैक करने के लिए अपना आवेदन संदर्भ नंबर तैयार रखें।",
-            "next_step": "क्या आप स्टेटस जांचने के चरण जानना चाहते हैं?",
-        },
-    },
-    "register_complaint": {
-        "en": {
-            "confirmation": "I can help you register a complaint.",
-            "explanation": "Please share your issue details, department, and location to proceed.",
-            "next_step": "Would you like a complaint registration checklist?",
-        },
-        "hi": {
-            "confirmation": "मैं शिकायत दर्ज कराने में आपकी मदद कर सकता हूँ।",
-            "explanation": "आगे बढ़ने के लिए कृपया समस्या, विभाग और स्थान की जानकारी दें।",
-            "next_step": "क्या आप शिकायत दर्ज करने की चेकलिस्ट चाहते हैं?",
-        },
-    },
-    "unknown": {
-        "en": {
-            "confirmation": "I couldn't understand your request.",
-            "explanation": "Please try asking again in a short sentence.",
-            "next_step": "You can ask about government schemes, loans, or complaints.",
-        },
-        "hi": {
-            "confirmation": "मैं आपकी बात समझ नहीं पाया।",
-            "explanation": "कृपया एक छोटे वाक्य में फिर से पूछें।",
-            "next_step": "आप सरकारी योजनाओं, लोन या शिकायत के बारे में पूछ सकते हैं।",
-        },
-    },
-}
+
+def _record_timing(telemetry: Optional[dict], key: str, value_ms: float) -> None:
+    if telemetry is None:
+        return
+    telemetry[key] = round(float(telemetry.get(key, 0.0)) + max(float(value_ms), 0.0), 2)
 
 
-def _debug_print(label: str, value: object) -> None:
-    safe_value = str(value).encode("unicode_escape").decode("ascii")
-    logger.info("flow_debug", extra={"event": label.strip(":"), "count": safe_value})
+def _fallback(lang: str) -> dict:
+    return dict(FALLBACK_RESPONSES.get(lang, FALLBACK_RESPONSES["en"]))
 
 
-def generate_response(language: str, transcript: str) -> Tuple[dict, str, float]:
+def generate_response(
+    language: str,
+    transcript: str,
+    last_scheme: Optional[str] = None,
+    telemetry: Optional[dict] = None,
+) -> Tuple[dict, str, float, list]:
+    """
+    Returns (response_dict, intent_str, confidence_float, top_k_list).
+    Never raises — always returns something usable.
+    """
     lang = "hi" if (language or "").strip().lower() == "hi" else "en"
+    query_text = (transcript or "").lower().strip()
 
-    # 1) RAG first
-    _debug_print("Transcript:", transcript)
-    _debug_print("Normalized query:", normalize_text(transcript))
-    logger.info("flow_stage", extra={"event": "rag_lookup"})
-    scheme = retrieve_scheme(transcript, lang)
-    if scheme:
-        intent = "scheme_query"
-        confidence = 1.0
-        _debug_print("Detected intent:", intent)
-        _debug_print("Confidence:", confidence)
-        return scheme, intent, confidence
+    if not query_text:
+        return _fallback(lang), "unknown", 0.0, []
 
-    # 2) Intent model only after RAG miss
-    intent, confidence = predict_intent(transcript)
-    confidence = float(confidence)
-    if intent not in RESPONSES:
-        intent = "unknown"
+    logger.info("flow_input query=%r lang=%s last_scheme=%r", query_text[:80], lang, last_scheme)
 
-    # 3) Threshold fallback for non-scheme intents only
-    if intent != "unknown" and confidence < INTENT_THRESHOLD:
-        intent = "unknown"
+    t0 = perf_counter()
+    response, matched_scheme, confidence = get_scheme_response(
+        query=transcript,
+        language=language,
+        last_scheme=last_scheme,
+    )
+    _record_timing(telemetry, "engine_time_ms", (perf_counter() - t0) * 1000.0)
 
-    _debug_print("Detected intent:", intent)
-    _debug_print("Confidence:", confidence)
-    return RESPONSES[intent][lang], intent, confidence
+    if matched_scheme:
+        logger.info("flow_match scheme=%r confidence=%.2f", matched_scheme, confidence)
+        return response, "scheme_query", confidence, [matched_scheme]
+
+    logger.warning("flow_no_match query=%r", query_text[:60])
+    return _fallback(lang), "unknown", 0.0, []

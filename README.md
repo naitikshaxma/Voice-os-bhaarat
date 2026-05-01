@@ -7,8 +7,8 @@ It accepts voice or text input, transcribes speech, detects intent, retrieves re
 ## Architecture
 - `frontend/`: React + Vite client for voice capture, language selection, and response display.
 - `backend/`: FastAPI application that orchestrates STT, intent inference, scheme retrieval, and TTS.
-- `datasets/`: canonical datasets used by backend services (`schemes_dataset.json`).
-- `models/`: local model artifacts (kept out of git by default).
+- `datasets/`: optional data generation scripts and small sample source material.
+- Runtime: uses a lightweight embedded scheme set and rule-based intent routing by default.
 - `scripts/`: utility scripts (for example, dataset generation).
 - `tests/`: local pipeline/integration tests.
 - `docs/`: project documentation assets.
@@ -23,7 +23,7 @@ Request flow:
 ## Tech Stack
 - Backend: FastAPI, Uvicorn, PyTorch, Transformers, OpenAI Whisper, RapidFuzz, gTTS
 - Frontend: React, TypeScript, Vite, Tailwind CSS
-- Data/ML: JSON scheme dataset + local HuggingFace-style intent model artifacts
+- Data/ML: lightweight embedded scheme data + rule-based intent routing
 
 ## Setup Instructions
 

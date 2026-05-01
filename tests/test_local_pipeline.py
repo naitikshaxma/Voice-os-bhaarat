@@ -49,10 +49,10 @@ def run_pipeline_test() -> None:
         health = wait_for_backend()
         if not health.get("whisper", {}).get("model_loaded"):
             raise RuntimeError("Whisper did not load correctly.")
-        if not health.get("intent_model", {}).get("loaded"):
-            raise RuntimeError("BERT model did not load correctly.")
-        if int(health.get("rag", {}).get("total_schemes", 0)) != 500:
-            raise RuntimeError("RAG dataset did not load with 500 schemes.")
+        if health.get("intent_model", {}).get("mode") != "rule_based":
+            raise RuntimeError("Intent service is not running in rule-based mode.")
+        if int(health.get("rag", {}).get("total_schemes", 0)) <= 0:
+            raise RuntimeError("Embedded RAG dataset did not load.")
 
         query = "pm kisan scheme kya hai"
         payload = None
