@@ -20,7 +20,6 @@ jobs:
 
       - name: Install backend deps
         run: |
-          cd backend
           pip install -r requirements.txt
 
       - name: Start backend
